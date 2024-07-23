@@ -8,3 +8,9 @@ Supervisors:
 - Seurinck
 - Saeys
 
+Folders:
+- data
+- images
+- spatial NicheNet
+- DeepCOLOR
+- 
