@@ -1,4 +1,6 @@
-# spatialNicheNet
+# Integrating Spatial Transcriptomics for Intercellular Communication with NicheNet
+A case study on the Kupffer cell niche of the liver
+
 Master's thesis project at UGent 2023-2024.
 
 Yunseol Park
