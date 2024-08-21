@@ -1,0 +1,505 @@
+---
+title: "Spatial NicheNet"
+output: html_document
+date: "2024-07-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+This is the main file for spatially informed NicheNet analysis.
+
+# Load libraries
+
+```{r}
+library(nichenetr)
+library(Seurat)
+library(SeuratObject)
+library(tidyverse)
+library(dplyr)
+```
+
+# Background
+## Read data
+```{r}
+source('data_cleanup.R')
+sc = sc_clean()
+sc = SetIdent(sc, value = "annot_fine_zonated")
+```
+
+```{r}
+spatial_data = spatial_clean()
+a1 = spatial_data[[1]]
+Idents(a1) <- a1$annotationSave
+a2 = spatial_data[[2]]
+Idents(a2) <- a2$annotationSave
+c2 = spatial_data[[3]]
+Idents(c2) <- c2$annotationSave
+d2 = spatial_data[[4]]
+Idents(d2) <- d2$annotationSave
+```
+
+```{r}
+# Get the common cell types
+sender = intersect(sc$annot_fine_zonated, a1$annotationSave)
+sc = subset(sc, idents=sender)
+```
+
+## Set networks
+
+The networks and matrix for mice are used.
+
+```{r}
+lr_network = readRDS(
+  url("https://zenodo.org/record/7074291/files/lr_network_mouse_21122021.rds"))
+ligand_target_matrix = readRDS(url(
+  "https://zenodo.org/record/7074291/files/ligand_target_matrix_nsga2r_final_mouse.rds"))
+weighted_networks = readRDS(url(
+  "https://zenodo.org/record/7074291/files/weighted_networks_nsga2r_final_mouse.rds"))
+```
+
+```{r}
+lr_network = lr_network %>% distinct(from, to)
+weighted_networks_lr = weighted_networks$lr_sig %>% 
+  inner_join(lr_network, by = c("from","to"))
+```
+
+# Gene set of interest
+
+```{r}
+# Set receiver as kupffer cells
+receiver = "KCs"
+expressed_genes_receiver = get_expressed_genes(receiver, sc, pct = 0.10)
+```
+
+```{r}
+# Set background gene set as the whole genome
+background_expressed_genes = sc@assays[["RNA"]]@counts@Dimnames[[1]] %>% 
+  unique() %>% .[. %in% rownames(ligand_target_matrix)]
+```
+
+```{r}
+# Sender genes
+sender_celltypes = sender[sender != receiver]
+
+list_expressed_genes_sender = sender_celltypes %>% unique() %>% 
+  lapply(get_expressed_genes, sc, 0.10)
+expressed_genes_sender = list_expressed_genes_sender %>% unlist() %>% unique()
+```
+
+## Find gene set of interest
+```{r}
+# Find the gene set of interest
+seurat_obj_receiver = subset(sc, idents = receiver)
+seurat_obj_receiver = SetIdent(seurat_obj_receiver, value =
+                        seurat_obj_receiver[["annot_fine_zonated", drop=TRUE]])
+```
+
+```{r}
+# KCs against MoMac1 and 2
+DE_table_receiver = FindMarkers(object = sc, ident.1 = receiver, 
+                          ident.2 = c('MoMac1', 'MoMac2'), min.pct = 0.10) %>%
+  rownames_to_column("gene")
+```
+
+```{r}
+# Find gene set of interest
+geneset_oi = DE_table_receiver %>% 
+  filter(p_val_adj <= 0.05 & avg_log2FC >= 0.25) %>% pull(gene)
+geneset_oi = geneset_oi %>% .[. %in% rownames(ligand_target_matrix)]
+```
+
+# Ligand activities
+
+```{r}
+ligands = lr_network %>% pull(from) %>% unique()
+receptors = lr_network %>% pull(to) %>% unique()
+
+expressed_ligands = intersect(ligands,expressed_genes_sender)
+expressed_receptors = intersect(receptors,expressed_genes_receiver)
+```
+
+```{r}
+# Define potential ligands
+potential_ligands = lr_network %>% 
+  filter(from %in% expressed_ligands & to %in% expressed_receptors) %>% 
+  pull(from) %>% unique()
+```
+
+```{r}
+# Get ligand activities
+ligand_activities = predict_ligand_activities(
+  geneset = geneset_oi, 
+  background_expressed_genes = background_expressed_genes,
+  ligand_target_matrix = ligand_target_matrix, 
+  potential_ligands = potential_ligands
+  )
+ligand_activities = ligand_activities %>% arrange(-aupr_corrected) %>% 
+  mutate(rank = rank(desc(aupr_corrected)))
+```
+
+```{r}
+# Reformat the network for further analysis
+lr_network_renamed = lr_network %>% rename(ligand=from, receptor=to)
+```
+
+# Obtain the DE and expression tables
+
+```{r}
+# Make DE and expression info tables
+DE_table = calculate_de(sc, celltype_colname = "annot_fine_zonated",
+                     features = union(expressed_ligands, expressed_receptors))
+expression_info = get_exprs_avg(sc, "annot_fine_zonated")
+
+
+processed_DE_table = process_table_to_ic(DE_table, 
+                                         table_type = "celltype_DE",
+                                         lr_network_renamed, 
+                                         senders_oi = sender_celltypes, 
+                                         receivers_oi = receiver)
+
+processed_expr_table = process_table_to_ic(expression_info, 
+                                            table_type = "expression", 
+                                            lr_network_renamed)
+```
+
+```{r}
+# This line is necessary as the process_table_to_ic function
+# mutates the underscores in cell type annotations to dashes
+processed_expr_table = processed_expr_table %>% 
+  mutate(across(c('sender','receiver'), \(x) str_replace(x, '-','_')))
+```
+
+# Get prioritization tables
+
+## Run original NicheNet
+```{r}
+# Weights for original NicheNet
+prioritizing_weights = c("de_ligand" = 1,
+                         "de_receptor" = 1,
+                         "activity_scaled" = 2,
+                         "exprs_ligand" = 1,
+                         "exprs_receptor" = 1,
+                         "ligand_condition_specificity" = 0,
+                         "receptor_condition_specificity" = 0)
+
+# Generate prioritization table (NicheNet)
+prior_table = generate_prioritization_tables(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  prioritizing_weights = prioritizing_weights
+  )
+prior_table
+```
+
+## Run spatial NicheNet
+```{r}
+source('prioritization.R')
+source('plot_prior.R')
+# Weights for spatial NicheNet
+prioritizing_weights_spatial = c("de_ligand" = 1,
+                                 "de_receptor" = 1,
+                                 "activity_scaled" = 2,
+                                 "exprs_ligand" = 1,
+                                 "exprs_receptor" = 1,
+                                 "ligand_condition_specificity" = 0,
+                                 "receptor_condition_specificity" = 0,
+                                 "spatial_proximity" = 1)
+```
+
+### Giotto
+
+```{r}
+source('giotto_fin.R')
+proximity_matrices = giotto_spatial_proximity(a1,a2,c2,d2)
+```
+
+#### Prioritization using each spatial data
+
+```{r}
+a1_proximity = proximity_matrices[2]$enrichm_res
+a2_proximity = proximity_matrices[4]$enrichm_res
+c2_proximity = proximity_matrices[6]$enrichm_res
+d2_proximity = proximity_matrices[8]$enrichm_res
+```
+
+##### A1-1 
+```{r}
+spatial_prior_a1 = scaled_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = a1_proximity,
+  prioritizing_weights = prioritizing_weights_spatial)
+
+# Prioritizaion table
+spatial_prior_a1
+
+# Prioritzation changes compared to original NicheNet
+a1_vs_orginal = plot_prioritization(prior_table, spatial_prior_a1)
+a1_vs_orginal
+```
+
+##### A1-2
+```{r}
+spatial_prior_a2 = scaled_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = a2_proximity,
+  prioritizing_weights = prioritizing_weights_spatial)
+
+# Prioritizaion table
+spatial_prior_a2
+
+# Prioritzation changes compared to original NicheNet
+a2_vs_orginal = plot_prioritization(prior_table, spatial_prior_a2)
+a2_vs_orginal
+```
+
+##### C2
+```{r}
+spatial_prior_c2 = scaled_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = c2_proximity,
+  prioritizing_weights = prioritizing_weights_spatial)
+
+# Prioritizaion table
+spatial_prior_c2
+
+# Prioritzation changes compared to original NicheNet
+c2_vs_orginal = plot_prioritization(prior_table, spatial_prior_c2)
+c2_vs_orginal
+```
+
+##### D2-1
+```{r}
+spatial_prior_d2 = scaled_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = d2_proximity,
+  prioritizing_weights = prioritizing_weights_spatial)
+
+# Prioritizaion table
+spatial_prior_d2
+
+# Prioritzation changes compared to original NicheNet
+d2_vs_orginal = plot_prioritization(prior_table, spatial_prior_d2, add_col=T)
+d2_vs_orginal
+```
+
+#### Prioritization using average enrichment
+
+```{r}
+# Average enrichment score from the four datasets
+avg_delaunay = as.data.frame(proximity_matrices[9:50])
+```
+
+```{r}
+spatial_prior_full = scaled_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = avg_delaunay,
+  prioritizing_weights = prioritizing_weights_spatial)
+
+# Prioritizaion table
+spatial_prior_full
+
+# Prioritzation changes compared to original NicheNet
+giotto_vs_orginal = plot_prioritization(prior_table, spatial_prior_full)
+giotto_vs_orginal
+```
+
+```{r}
+# Plot the variability of the results
+source('variability_plot.R')
+figures = plot_variability_ranking(spatial_prior_full, 
+                                   spatial_prior_a1,
+                                   spatial_prior_a2,
+                                   spatial_prior_c2,
+                                   spatial_prior_d2)
+figures[[2]]
+```
+
+##### Prioritization without scaling
+
+```{r}
+spatial_prior_unscaled = unscaled_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = avg_delaunay,
+  prioritizing_weights = prioritizing_weights_spatial)
+
+# Prioritizaion table
+spatial_prior_unscaled
+
+# Prioritzation changes compared to original NicheNet
+giottoU_vs_orginal = plot_prioritization(prior_table, spatial_prior_unscaled)
+giottoU_vs_orginal
+```
+
+```{r}
+# Plot the variability of the results
+figures = plot_variability_ranking(spatial_prior_unscaled, 
+                                   spatial_prior_a1,
+                                   spatial_prior_a2,
+                                   spatial_prior_c2,
+                                   spatial_prior_d2)
+figures[[2]]
+```
+
+##### Prioritization with different weight
+```{r}
+spatial_prior_weight = unscaled_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = avg_delaunay,
+  prioritizing_weights = c("de_ligand" = 1,
+                                 "de_receptor" = 1,
+                                 "activity_scaled" = 2,
+                                 "exprs_ligand" = 1,
+                                 "exprs_receptor" = 1,
+                                 "ligand_condition_specificity" = 0,
+                                 "receptor_condition_specificity" = 0,
+                                 "spatial_proximity" = 2.4))
+
+# Prioritizaion table
+spatial_prior_weight
+
+# Prioritzation changes compared to original NicheNet
+giottoW_vs_orginal = plot_prioritization(prior_table, spatial_prior_weight)
+giottoW_vs_orginal
+```
+
+```{r}
+# Plot the variability of the results
+figures = plot_variability_ranking(spatial_prior_weight, 
+                                   spatial_prior_a1,
+                                   spatial_prior_a2,
+                                   spatial_prior_c2,
+                                   spatial_prior_d2)
+figures[[2]]
+```
+
+
+#### Differential distance
+```{r}
+source('giotto_fin.R')
+source('prioritization.R')
+communication_giotto = giotto_diff(a1)
+juxtacrine = communication_giotto[[1]]$enrichm_res
+paracrine = communication_giotto[[2]]$enrichm_res
+endocrine = communication_giotto[[3]]$enrichm_res
+```
+
+```{r}
+spatial_prior_dist = lr_diff_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix_connected = juxtacrine,
+  spatial_matrix_paracrine = endocrine,
+  prioritizing_weights = prioritizing_weights_spatial)
+
+# Prioritizaion table
+spatial_prior_dist
+
+# Distance-based Giotto vs original
+dist_vs_original = plot_prioritization(prior_table, spatial_prior_dist)
+dist_vs_original
+```
+
+### Prioritization using Squidpy enrichment
+
+Read in the enrichment scores and preprocess them.
+
+```{r}
+a1_sq = read.csv('data/A1_1_sq.csv') %>%
+  mutate(enrichm = enrichment.depletion, sender=Sender) %>%
+  select('sender', 'count', 'enrichm')
+a2_sq = read.csv('data/A1_2_sq.csv') %>%
+  mutate(enrichm = enrichment.depletion, sender=Sender) %>%
+  select('sender', 'count', 'enrichm')
+c2_sq = read.csv('data/C2_sq.csv') %>%
+  mutate(enrichm = enrichment.depletion, sender=Sender) %>%
+  select('sender', 'count', 'enrichm')
+d2_sq = read.csv('data/D2_1_sq.csv') %>%
+  mutate(enrichm = enrichment.depletion, sender=Sender) %>%
+  select('sender', 'count', 'enrichm')
+```
+
+#### Prioritization using each spatial data
+
+##### A1-1
+```{r}
+spatial_prior_sq_a1 = squidpy_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = a1_sq,
+  prioritizing_weights = prioritizing_weights_spatial)
+spatial_prior_sq_a1
+
+sqA1_vs_original = plot_prioritization(prior_table, spatial_prior_sq_a1)
+sqA1_vs_original
+```
+##### A1-2
+```{r}
+spatial_prior_sq_a2 = squidpy_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = a2_sq,
+  prioritizing_weights = prioritizing_weights_spatial)
+spatial_prior_sq_a2
+
+sqa2_vs_original = plot_prioritization(prior_table, spatial_prior_sq_a2)
+sqa2_vs_original
+```
+
+##### C2
+```{r}
+spatial_prior_sq_c2 = squidpy_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = c2_sq,
+  prioritizing_weights = prioritizing_weights_spatial)
+spatial_prior_sq_c2
+
+sqc2_vs_original = plot_prioritization(prior_table, spatial_prior_sq_c2)
+sqc2_vs_original
+```
+
+##### D2-1
+```{r}
+spatial_prior_sq_d2 = squidpy_prioritization_table(
+  processed_expr_table,
+  processed_DE_table,
+  ligand_activities,
+  spatial_matrix = d2_sq,
+  prioritizing_weights = prioritizing_weights_spatial)
+spatial_prior_sq_d2
+
+sqd2_vs_original = plot_prioritization(prior_table, spatial_prior_sq_d2, 
+                                       add_col=T)
+sqd2_vs_original
+```
+#### Plot variability of the results
+
+```{r}
+figures = plot_variability_ranking_sq(spatial_prior_sq_a1,
+                                      spatial_prior_sq_a2,
+                                      spatial_prior_sq_c2,
+                                      spatial_prior_sq_d2)
+
+figures[[2]]
+```

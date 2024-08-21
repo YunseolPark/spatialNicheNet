@@ -1,0 +1,306 @@
+---
+title: "Giotto proximity enrichment"
+output: html_document
+date: "2024-07-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+# Load libraries
+
+```{r}
+library(Giotto)
+library(Seurat)
+library(reshape2)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(viridis)
+```
+
+# Read data
+```{r}
+source('data_cleanup.R')
+sp_data = spatial_clean()
+a1 = sp_data[[1]]
+a2 = sp_data[[2]]
+c2 = sp_data[[3]]
+d2 = sp_data[[4]]
+```
+
+# Run Giotto
+
+
+
+```{r}
+# Set python path for Giotto
+instr <- createGiottoInstructions(python_path = "C:/Users/yunseolp/Documents/.virtualenvs/r-reticulate/Scripts/python.exe")
+```
+
+```{r}
+# Set idents to annotations
+Idents(a1) <- a1$annotationSave
+Idents(a2) <- a2$annotationSave
+Idents(c2) <- c2$annotationSave
+Idents(d2) <- d2$annotationSave
+```
+
+## Create Giotto objects
+
+```{r}
+# A1-1
+a1_giotto_obj <- createGiottoObject(GetAssayData(a1, layer="counts"),
+                          norm_expr = GetAssayData(a1),
+                          spatial_locs = a1@reductions$spatial@cell.embeddings,
+                          cell_metadata = a1@meta.data,
+                          instructions = instr)
+
+#A1-2
+a2_giotto_obj <- createGiottoObject(GetAssayData(a2, layer="counts"),
+                          norm_expr = GetAssayData(a2),
+                          spatial_locs = a2@reductions$spatial@cell.embeddings,
+                          cell_metadata = a2@meta.data, instructions = instr)
+
+#C2
+c2_giotto_obj <- createGiottoObject(GetAssayData(c2, layer="counts"),
+                          norm_expr = GetAssayData(c2),
+                          spatial_locs = c2@reductions$spatial@cell.embeddings,
+                          cell_metadata = c2@meta.data, instructions = instr)
+
+#D2-1
+d2_giotto_obj <- createGiottoObject(GetAssayData(d2, layer="counts"),
+                          norm_expr = GetAssayData(d2),
+                          spatial_locs = d2@reductions$spatial@cell.embeddings,
+                          cell_metadata = d2@meta.data, instructions = instr)
+```
+
+## Create spatial networks (Delaunay) and calculate proximity enrichments
+
+```{r}
+# A1-1
+a1_giotto_obj <- createSpatialNetwork(gobject = a1_giotto_obj,
+                                      maximum_distance_delaunay = 200)
+a1_cell_proximities_deluanay <- cellProximityEnrichment(gobject = a1_giotto_obj,
+                                     cluster_column = 'annotationSave',
+                                     spatial_network_name = 'Delaunay_network',
+                                     adjust_method = 'fdr',
+                                     number_of_simulations = 1000,
+                                     set_seed = TRUE,
+                                     seed_number = 0)
+
+# A1-2
+a2_giotto_obj <- createSpatialNetwork(gobject = a2_giotto_obj,
+                                      maximum_distance_delaunay = 200)
+a2_cell_proximities_deluanay <- cellProximityEnrichment(gobject = a2_giotto_obj,
+                                      cluster_column = 'annotationSave',
+                                      spatial_network_name = 'Delaunay_network',
+                                      adjust_method = 'fdr',
+                                      number_of_simulations = 1000,
+                                      set_seed = TRUE,
+                                      seed_number = 0)
+
+# C2
+c2_giotto_obj <- createSpatialNetwork(gobject = c2_giotto_obj,
+                                      maximum_distance_delaunay = 200)
+c2_cell_proximities_deluanay <- cellProximityEnrichment(gobject = c2_giotto_obj,
+                                      cluster_column = 'annotationSave',
+                                      spatial_network_name = 'Delaunay_network',
+                                      adjust_method = 'fdr',
+                                      number_of_simulations = 1000,
+                                      set_seed = TRUE,
+                                      seed_number = 0)
+
+# D2-1
+d2_giotto_obj <- createSpatialNetwork(gobject = d2_giotto_obj, 
+                                      maximum_distance_delaunay = 200)
+d2_cell_proximities_deluanay <- cellProximityEnrichment(gobject = d2_giotto_obj,
+                                      cluster_column = 'annotationSave',
+                                      spatial_network_name = 'Delaunay_network',
+                                      adjust_method = 'fdr',
+                                      number_of_simulations = 1000,
+                                      set_seed = TRUE,
+                                      seed_number = 0)
+```
+
+### Calculate the average proximity enrichment scores
+
+```{r}
+avg_delaunay = list(a1_cell_proximities_deluanay$enrichm_res, 
+                      a2_cell_proximities_deluanay$enrichm_res,
+                      c2_cell_proximities_deluanay$enrichm_res, 
+                      d2_cell_proximities_deluanay$enrichm_res) %>%
+    reduce(full_join, by='unified_int')
+avg_delaunay$enrichm = avg_delaunay %>% select(matches('enrichm')) %>%
+  rowMeans(na.rm=T)
+```
+
+## Cell proximity visualization
+
+```{r}
+source('plot_cellproximityenrichment.R')
+```
+
+#### Average proximity
+
+The proximity enrichment is visualized. The enrichment scores as well as the number of interactions for the averaged enrichment are reported here. The below shows Figure 3.1 in the dissertation.
+
+```{r}
+cellProximityBarplot_KC(avg_delaunay, average=T)
+```
+
+The below are visualizations for each of the four datasets.
+
+#### A1-1
+```{r}
+cellProximityBarplot_KC(a1_cell_proximities_deluanay$enrichm_res)
+```
+
+#### A1-2
+```{r}
+cellProximityBarplot_KC(a2_cell_proximities_deluanay$enrichm_res)
+```
+
+#### C2
+```{r}
+cellProximityBarplot_KC(c2_cell_proximities_deluanay$enrichm_res)
+```
+
+#### D2-1
+```{r}
+cellProximityBarplot_KC(d2_cell_proximities_deluanay$enrichm_res)
+```
+
+## Check variability between datasets
+
+Process the enrichment result so that only the desired values remain.
+Here, the p-values of each enrichment can also be seen.
+
+```{r}
+# A1-1
+## Filter cells that interact with KCs
+a1_en1 = a1_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('KCs--', unified_int)) %>% 
+  separate(unified_int, c('receiver', 'sender'), sep='--')
+a1_en2 = a1_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('--KCs', unified_int)) %>% 
+  separate(unified_int, c('sender', 'receiver'), sep='--')
+## Only keep the sender cell type and enrichment score
+a1_en = rbind(a1_en1, a1_en2[a1_en2$sender!='KCs',]) 
+# View full enrichment matix
+a1_en
+
+## Filter for significant p-values
+a1_p = a1_en[a1_en$p_higher_orig <= 0.05 | a1_en$p_lower_orig <= 0.05,]
+# View the significant enrichment matrix
+a1_p
+
+## Select for sender and scores
+a1_en = a1_en %>% select(sender, enrichm)
+```
+
+```{r}
+# A1-2
+## Filter cells that interact with KCs
+a2_en1 = a2_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('KCs--', unified_int)) %>% 
+  separate(unified_int, c('receiver', 'sender'), sep='--')
+a2_en2 = a2_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('--KCs', unified_int)) %>% 
+  separate(unified_int, c('sender', 'receiver'), sep='--')
+## Only keep the sender cell type and enrichment score
+a2_en = rbind(a2_en1, a2_en2[a2_en2$sender!='KCs',]) 
+# View full enrichment matix
+a2_en
+
+## Filter for significant p-values
+a2_p = a2_en[a2_en$p_higher_orig <= 0.05 | a2_en$p_lower_orig <= 0.05,]
+# View the significant enrichment matrix
+a2_p
+
+## Select for sender and scores
+a2_en = a2_en %>% select(sender, enrichm)
+```
+
+```{r}
+# C2
+## Filter cells that interact with KCs
+c2_en1 = c2_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('KCs--', unified_int)) %>% 
+  separate(unified_int, c('receiver', 'sender'), sep='--')
+c2_en2 = c2_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('--KCs', unified_int)) %>% 
+  separate(unified_int, c('sender', 'receiver'), sep='--')
+## Only keep the sender cell type and enrichment score
+c2_en = rbind(c2_en1, c2_en2[c2_en2$sender!='KCs',])
+# View full enrichment matix
+c2_en
+
+## Filter for significant p-values
+c2_p = c2_en[c2_en$p_higher_orig <= 0.05 | c2_en$p_lower_orig <= 0.05,]
+# View the significant enrichment matrix
+c2_p
+
+## Select for sender and scores
+c2_en = c2_en  %>% select(sender, enrichm)
+```
+
+```{r}
+# D2-1
+## Filter cells that interact with KCs
+d2_en1 = d2_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('KCs--', unified_int)) %>% 
+  separate(unified_int, c('receiver', 'sender'), sep='--')
+d2_en2 = d2_cell_proximities_deluanay$enrichm_res %>% 
+  filter(grepl('--KCs', unified_int)) %>% 
+  separate(unified_int, c('sender', 'receiver'), sep='--')
+## Only keep the sender cell type and enrichment score
+d2_en = rbind(d2_en1, d2_en2[d2_en2$sender!='KCs',]) 
+# View full enrichment matix
+d2_en
+
+## Filter for significant p-values
+d2_p = d2_en[d2_en$p_higher_orig <= 0.05 | d2_en$p_lower_orig <= 0.05,]
+# View the significant enrichment matrix
+d2_p
+
+## Select for sender and scores
+d2_en=d2_en%>% select(sender, enrichm)
+```
+
+Prepare to plot the enrichment scores.
+
+```{r}
+# Combine the four dataframes into one
+delaunay_box = list(a1_en, a2_en, c2_en, d2_en) %>% 
+  reduce(full_join, by='sender')
+# Set row and column names
+rownames(delaunay_box) = delaunay_box$sender
+delaunay_box$sender = NULL
+colnames(delaunay_box) = c('A1','A2','C2','D2')
+# Format the dataframe for plot
+delaunay_box_plot = delaunay_box %>% melt() %>%
+  dplyr::mutate(Dataset=variable, Score=value)
+```
+
+The below is the table used for Table 3.1 in the dissertation.
+```{r}
+thesis_tbl = delaunay_box
+thesis_tbl$Average = rowMeans(thesis_tbl, na.rm = T)
+thesis_tbl$SD = apply(thesis_tbl, 1, sd, na.rm=TRUE)
+thesis_tbl %>% arrange(-Average)
+```
+
+Create a violin/box plot of enrichment score for each dataset.
+This is the Figure B.1 in the dissertation.
+```{r}
+fig1 = ggplot(delaunay_box_plot, aes(x=variable, y=value))+
+  geom_violin(width=1)+
+  geom_boxplot(width=0.2, color='black')+
+  scale_fill_viridis(discrete=TRUE)+
+  labs(y='Enrichment score')+
+  theme(axis.title.x=element_blank())+
+  scale_x_discrete(labels=c('A1-1','A1-2','C2','D2-1'))
+fig1
+```
