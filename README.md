@@ -20,5 +20,6 @@ Files:
 - `spatialNicheNet`: contains files for spatially informed NicheNet analysis
   - `giotto_proximity_enrichment`: Giotto proximity enrichment results and visualizations
   - `spatialNicheNet`: the main spatial NicheNet analysis
-  - `interaction_input.csv`: CellPhoneDB database for ligand-receptor pairs and their communication type
+  - `prioritization.R`: contains the modified `prioritization_table` function (NicheNet)
+  - `data/interaction_input.csv`: CellPhoneDB database for ligand-receptor pairs and their communication type
   - All R scripts, files with extension `.R`, contain functions necessary for the R markdown files
